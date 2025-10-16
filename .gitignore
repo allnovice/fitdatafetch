@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+
+# Local database
+*.db
+
+# Google service keys / secrets
+AA.json
+
+# macOS / Linux / Windows
+.DS_Store
+Thumbs.db
