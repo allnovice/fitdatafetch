@@ -1,0 +1,32 @@
+# .github/workflows/daily_fetch.yml
+name: Daily Fetch
+
+on:
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  fetch-steps:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily fetch
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          NEON_CONN: ${{ secrets.NEON_CONN }}
+        run: |
+          python dfit.py
