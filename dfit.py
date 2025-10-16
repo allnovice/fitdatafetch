@@ -12,9 +12,8 @@ load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
-CONN_STR = os.getenv("NEON_CONN")  # PostgreSQL connection
+CONN_STR = os.getenv("NEON_CONN")
 
-# Google Fit endpoint
 FIT_URL = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
 
 # -------------------------------
@@ -56,7 +55,7 @@ def get_access_token():
     return resp.json()["access_token"]
 
 # -------------------------------
-# Get last fetched day
+# Get last fetched timestamp (UTC)
 # -------------------------------
 def get_last_fetched_day():
     c.execute("SELECT value FROM meta WHERE key='last_fetch'")
@@ -64,14 +63,14 @@ def get_last_fetched_day():
     if row:
         return int(row[0])
     else:
-        # Default: 5 years ago
-        start = int((datetime.utcnow() - timedelta(days=365*5)).timestamp() * 1000)
+        # default: fetch from 5 years ago
+        start = int((datetime.utcnow() - timedelta(days=365 * 5)).timestamp() * 1000)
         c.execute("INSERT INTO meta VALUES (%s, %s)", ('last_fetch', str(start)))
         conn.commit()
         return start
 
 # -------------------------------
-# Fetch Google Fit data
+# Fetch Fit data
 # -------------------------------
 def fetch_fit_data(access_token, start_ms, end_ms):
     headers = {
@@ -80,7 +79,7 @@ def fetch_fit_data(access_token, start_ms, end_ms):
     }
     body = {
         "aggregateBy": [{"dataTypeName": "com.google.step_count.delta"}],
-        "bucketByTime": {"durationMillis": 86400000},
+        "bucketByTime": {"durationMillis": 86400000},  # 1 day
         "startTimeMillis": start_ms,
         "endTimeMillis": end_ms
     }
@@ -89,7 +88,7 @@ def fetch_fit_data(access_token, start_ms, end_ms):
     return resp.json()
 
 # -------------------------------
-# Save data to DB
+# Save to DB
 # -------------------------------
 def save_steps(data):
     for bucket in data.get("bucket", []):
@@ -108,27 +107,37 @@ def save_steps(data):
     conn.commit()
 
 # -------------------------------
-# Main logic
+# Main: Daily Catch-up (-1 day)
 # -------------------------------
 def main():
     access_token = get_access_token()
     last_fetch_ms = get_last_fetched_day()
 
-    # Local timezone +8
+    # Local timezone (UTC+8)
     tz = timezone(timedelta(hours=8))
 
-    last_fetch_dt = datetime.fromtimestamp(last_fetch_ms/1000, tz)
-    start_dt = (last_fetch_dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday_dt = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    # Convert last_fetch_ms to local time
+    last_fetch_dt = datetime.fromtimestamp(last_fetch_ms / 1000, tz=timezone.utc).astimezone(tz)
 
-    if start_dt > yesterday_dt:
+    # Start from last_fetch midnight
+    start_dt = last_fetch_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # End = today midnight (so we fetch full yesterday)
+    today_dt = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_dt = today_dt
+
+    print("🕒 last_fetch_dt:", last_fetch_dt)
+    print("🕒 start_dt:", start_dt)
+    print("🕒 end_dt:", end_dt)
+
+    if start_dt >= end_dt:
         print("✅ No new data to fetch (already up to yesterday)")
         return
 
     start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int((yesterday_dt + timedelta(days=1)).timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
 
-    print(f"Fetching steps from {start_dt.date()} to {yesterday_dt.date()}")
+    print(f"📦 Fetching steps from {start_dt.date()} to {end_dt.date() - timedelta(days=1)}")
 
     chunk_ms = 30 * 24 * 60 * 60 * 1000  # 30 days
     current_start = start_ms
@@ -142,7 +151,7 @@ def main():
             print("⚠️ Error fetching chunk:", e)
         current_start = current_end
 
-    # Update last fetch in meta table
+    # Update last_fetch to end_dt
     c.execute("UPDATE meta SET value=%s WHERE key='last_fetch'", (str(end_ms),))
     conn.commit()
     print("✅ Daily catch-up fetch complete")

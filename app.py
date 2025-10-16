@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import psycopg2
 import pandas as pd
@@ -23,9 +22,17 @@ def get_steps_data():
     ORDER BY start_time
     """
     df = pd.read_sql(query, conn)
-    # Convert millis to datetime
-    df["start_time"] = pd.to_datetime(df["start_time"], unit="ms", utc=True)
-    df["end_time"] = pd.to_datetime(df["end_time"], unit="ms", utc=True)
+    # Convert millis → datetime → local timezone → date only
+    df["start_time"] = (
+        pd.to_datetime(df["start_time"], unit="ms", utc=True)
+        .dt.tz_convert("Asia/Manila")
+        .dt.date
+    )
+    df["end_time"] = (
+        pd.to_datetime(df["end_time"], unit="ms", utc=True)
+        .dt.tz_convert("Asia/Manila")
+        .dt.date
+    )
     return df
 
 # -------------------------------
@@ -43,6 +50,6 @@ else:
 
     # Show chart
     st.subheader("Steps Over Time")
-    chart_df = df.groupby(df["start_time"].dt.date)["steps"].sum().reset_index()
+    chart_df = df.groupby("start_time")["steps"].sum().reset_index()
     chart_df.rename(columns={"start_time": "date", "steps": "total_steps"}, inplace=True)
     st.line_chart(chart_df.set_index("date")["total_steps"])
