@@ -1,10 +1,8 @@
 from dotenv import load_dotenv
 import os
-import psycopg2
 import requests
-import time
-import json
-from datetime import datetime, timezone
+import psycopg2
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 
@@ -14,17 +12,17 @@ load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
-DB_CONN = os.getenv("NEON_CONN")
+CONN_STR = os.getenv("NEON_CONN")  # PostgreSQL connection
 
+# Google Fit endpoint
 FIT_URL = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
 
 # -------------------------------
 # DB setup
 # -------------------------------
-conn = psycopg2.connect(DB_CONN)
+conn = psycopg2.connect(CONN_STR)
 c = conn.cursor()
 
-# Ensure tables exist (same as full script)
 c.execute('''
 CREATE TABLE IF NOT EXISTS steps (
     start_time BIGINT,
@@ -58,47 +56,50 @@ def get_access_token():
     return resp.json()["access_token"]
 
 # -------------------------------
-# Get last fetch timestamp
+# Get last fetched day
 # -------------------------------
-def get_last_fetch_time():
+def get_last_fetched_day():
     c.execute("SELECT value FROM meta WHERE key='last_fetch'")
     row = c.fetchone()
     if row:
         return int(row[0])
-    # fallback: 1 day ago if no meta
-    fallback = int((datetime.now(timezone.utc).timestamp() - 86400) * 1000)
-    c.execute("INSERT INTO meta VALUES (%s, %s)", ('last_fetch', str(fallback)))
-    conn.commit()
-    return fallback
+    else:
+        # Default: 5 years ago
+        start = int((datetime.utcnow() - timedelta(days=365*5)).timestamp() * 1000)
+        c.execute("INSERT INTO meta VALUES (%s, %s)", ('last_fetch', str(start)))
+        conn.commit()
+        return start
 
 # -------------------------------
-# Fetch step data
+# Fetch Google Fit data
 # -------------------------------
 def fetch_fit_data(access_token, start_ms, end_ms):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
     body = {
         "aggregateBy": [{"dataTypeName": "com.google.step_count.delta"}],
-        "bucketByTime": {"durationMillis": 86400000},  # 1 day
+        "bucketByTime": {"durationMillis": 86400000},
         "startTimeMillis": start_ms,
         "endTimeMillis": end_ms
     }
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     resp = requests.post(FIT_URL, headers=headers, json=body)
     resp.raise_for_status()
     return resp.json()
 
 # -------------------------------
-# Save data
+# Save data to DB
 # -------------------------------
 def save_steps(data):
     for bucket in data.get("bucket", []):
         start = int(bucket["startTimeMillis"])
         end = int(bucket["endTimeMillis"])
-        steps = sum(
-            val.get("intVal", 0)
-            for dataset in bucket.get("dataset", [])
-            for point in dataset.get("point", [])
-            for val in point.get("value", [])
-        )
+        steps = 0
+        for dataset in bucket.get("dataset", []):
+            for point in dataset.get("point", []):
+                for val in point.get("value", []):
+                    steps += val.get("intVal", 0)
         if steps > 0:
             c.execute(
                 "INSERT INTO steps (start_time, end_time, steps) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
@@ -111,17 +112,40 @@ def save_steps(data):
 # -------------------------------
 def main():
     access_token = get_access_token()
-    start_ms = get_last_fetch_time()
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    last_fetch_ms = get_last_fetched_day()
 
-    print(f"Fetching from {datetime.fromtimestamp(start_ms/1000, timezone.utc)} to {datetime.fromtimestamp(now_ms/1000, timezone.utc)}")
-    data = fetch_fit_data(access_token, start_ms, now_ms)
-    save_steps(data)
+    # Local timezone +8
+    tz = timezone(timedelta(hours=8))
 
-    # update last fetch
-    c.execute("UPDATE meta SET value=%s WHERE key='last_fetch'", (str(now_ms),))
+    last_fetch_dt = datetime.fromtimestamp(last_fetch_ms/1000, tz)
+    start_dt = (last_fetch_dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_dt = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+
+    if start_dt > yesterday_dt:
+        print("✅ No new data to fetch (already up to yesterday)")
+        return
+
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int((yesterday_dt + timedelta(days=1)).timestamp() * 1000)
+
+    print(f"Fetching steps from {start_dt.date()} to {yesterday_dt.date()}")
+
+    chunk_ms = 30 * 24 * 60 * 60 * 1000  # 30 days
+    current_start = start_ms
+
+    while current_start < end_ms:
+        current_end = min(current_start + chunk_ms, end_ms)
+        try:
+            data = fetch_fit_data(access_token, current_start, current_end)
+            save_steps(data)
+        except Exception as e:
+            print("⚠️ Error fetching chunk:", e)
+        current_start = current_end
+
+    # Update last fetch in meta table
+    c.execute("UPDATE meta SET value=%s WHERE key='last_fetch'", (str(end_ms),))
     conn.commit()
-    print("✅ Daily data updated")
+    print("✅ Daily catch-up fetch complete")
 
 if __name__ == "__main__":
     main()

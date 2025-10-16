@@ -1,15 +1,13 @@
 from dotenv import load_dotenv
 import os
-import sqlite3
 import requests
-import time
-import json
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 load_dotenv()
 
 # -------------------------------
-# CONFIG (edit these)
+# CONFIG
 # -------------------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
@@ -22,7 +20,7 @@ FIT_URL = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
 # -------------------------------
 # DB setup
 # -------------------------------
-conn_str = os.getenv("NEON_CONN")  # or os.getenv("NEON_CONN")
+conn_str = os.getenv("NEON_CONN")
 conn = psycopg2.connect(conn_str)
 c = conn.cursor()
 
@@ -60,24 +58,9 @@ def get_access_token():
     return resp.json()["access_token"]
 
 # -------------------------------
-# Get last fetched timestamp
-# -------------------------------
-def get_last_fetch_time():
-    c.execute("SELECT value FROM meta WHERE key='last_fetch'")
-    row = c.fetchone()
-    if row:
-        return int(row[0])
-    else:
-        start = int((datetime.utcnow() - timedelta(days=365 * 5)).timestamp() * 1000)  # 5 years ago
-        c.execute("INSERT INTO meta VALUES (%, %)", ('last_fetch', str(start)))
-        conn.commit()
-        return start
-
-# -------------------------------
 # Fetch step data
 # -------------------------------
 def fetch_fit_data(access_token, start, end):
-    url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
@@ -91,12 +74,11 @@ def fetch_fit_data(access_token, start, end):
         "endTimeMillis": end
     }
 
-    # 👇 Add this line
     print("\n=== REQUEST BODY ===")
-    print(json.dumps(body, indent=2))
+    print(body)
     print("====================\n")
 
-    resp = requests.post(url, headers=headers, json=body)
+    resp = requests.post(FIT_URL, headers=headers, json=body)
     resp.raise_for_status()
     return resp.json()
 
@@ -114,9 +96,9 @@ def save_steps(data):
                     steps += val.get("intVal", 0)
         if steps > 0:
             c.execute(
-    "INSERT INTO steps (start_time, end_time, steps) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-    (start, end, steps)
-)
+                "INSERT INTO steps (start_time, end_time, steps) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (start, end, steps)
+            )
     conn.commit()
 
 # -------------------------------
@@ -125,19 +107,30 @@ def save_steps(data):
 def main():
     access_token = get_access_token()
 
-    from datetime import timezone, timedelta, datetime
-    now = datetime.now(timezone.utc)
-    start_ms = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    # Explicit UTC+8 timezone
+    local_tz = timezone(timedelta(hours=8))
+
+    # Ask user for start year/month
+    try:
+        year = int(input("Enter start year (YYYY): "))
+        month = int(input("Enter start month (1-12): "))
+        start_date = datetime(year, month, 1, tzinfo=local_tz)
+    except:
+        print("Invalid input, defaulting to Jan 2024")
+        start_date = datetime(2024, 1, 1, tzinfo=local_tz)
+
+    start_ms = int(start_date.timestamp() * 1000)
+    now = datetime.now(local_tz)
     now_ms = int(now.timestamp() * 1000)
 
     chunk_ms = 30 * 24 * 60 * 60 * 1000  # 30 days in ms
-
-    print(f"Fetching data from Jan 1 2024 to now in 30-day chunks...")
+    print(f"Fetching data from {start_date} to {now} in 30-day chunks...")
 
     current_start = start_ms
     while current_start < now_ms:
         current_end = min(current_start + chunk_ms, now_ms)
-        print(f"Fetching from {datetime.fromtimestamp(current_start/1000, timezone.utc)} to {datetime.fromtimestamp(current_end/1000, timezone.utc)}")
+        print(f"Fetching from {datetime.fromtimestamp(current_start/1000, local_tz)} "
+              f"to {datetime.fromtimestamp(current_end/1000, local_tz)}")
         try:
             data = fetch_fit_data(access_token, current_start, current_end)
             save_steps(data)
