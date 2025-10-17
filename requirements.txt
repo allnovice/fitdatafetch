@@ -3,3 +3,4 @@ python-dotenv
 psycopg2-binary
 pandas
 streamlit
+scikit-learn
